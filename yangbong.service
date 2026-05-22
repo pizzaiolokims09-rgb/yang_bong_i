@@ -1,0 +1,15 @@
+[Unit]
+Description=Yangbong-i Asset Rebalancing Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/yang-bong-i
+ExecStart=/home/ubuntu/yang-bong-i/.venv/bin/python3 -u main.py
+Environment=ENV_PASSWORD=alzk_720035^^
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

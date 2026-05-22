@@ -1,0 +1,12 @@
+requests
+python-telegram-bot
+google-generativeai
+apscheduler
+yfinance
+pandas
+matplotlib
+seaborn
+numpy
+python-dotenv
+aiohttp
+python-kis

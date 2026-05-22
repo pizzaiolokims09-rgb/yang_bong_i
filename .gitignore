@@ -1,0 +1,39 @@
+# Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Keys and Secrets
+.secret/
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# State and Data
+state.json
+meeting_history.json
+temp_log.txt
+*.png
+*.jpg
+*.jpeg
+*.log
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Misc
+get-pip.py
+walkthrough*
+test_cleanup.py
