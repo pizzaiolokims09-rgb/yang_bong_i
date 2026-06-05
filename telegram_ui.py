@@ -29,6 +29,28 @@ class YangbongBot:
         self.app.add_handler(CallbackQueryHandler(self.handle_callback, block=False))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message, block=False))
 
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Log the error and send a telegram message to notify the developer."""
+        logging.error("Exception while handling an update:", exc_info=context.error)
+        
+        try:
+            from broker_kis import KISAPIError
+            error_msg = "⚠️ 봇 내부에서 예기치 않은 오류가 발생했습니다."
+            if isinstance(context.error, KISAPIError):
+                error_msg = f"⚠️ KIS API 오류가 발생했습니다.\n상세: {context.error}"
+                
+            if isinstance(update, Update):
+                if update.message:
+                    await update.message.reply_text(error_msg)
+                elif update.callback_query:
+                    # 메시지 수정 시도, 실패하면 알림 팝업
+                    try:
+                        await update.callback_query.edit_message_text(error_msg)
+                    except:
+                        await update.callback_query.answer(error_msg, show_alert=True)
+        except Exception as e:
+            logging.error(f"Error handler itself failed: {e}")
+
     async def start_polling(self):
         logging.info("텔레그램 봇 Polling을 시작합니다...")
         await self.app.initialize()
@@ -259,6 +281,14 @@ class YangbongBot:
 
         try:
             await self._inner_handle_callback(update, context)
+        except Exception as e:
+            import traceback
+            from broker_kis import KISAPIError
+            logging.error(f"Telegram Callback Error: {e}\n{traceback.format_exc()}")
+            error_msg = "⚠️ 서버 통신 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+            if isinstance(e, KISAPIError):
+                error_msg = f"⚠️ KIS API 오류가 발생했습니다.\n상세: {e}"
+            await query.edit_message_text(text=error_msg)
         finally:
             if data in ['rebalance_info', 'execute_now', 'trend_hunter']:
                 self.is_processing = False
@@ -587,3 +617,8 @@ class YangbongBot:
         app.add_handler(CommandHandler("start", self.start))
         app.add_handler(CallbackQueryHandler(self.handle_callback))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
+        
+        # 전역 에러 핸들러 추가
+        app.add_error_handler(self.error_handler)
+
+        app.run_polling()

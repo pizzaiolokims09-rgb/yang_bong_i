@@ -4,13 +4,23 @@ import asyncio
 import requests
 
 class TrendHunter:
-    def __init__(self, api_key):
+    def __init__(self, api_key, state_manager=None):
         self.api_key = api_key
+        self.state_manager = state_manager
         self.model_flash = 'gemini-3-flash-preview'
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
 
     def _call_api_sync(self, prompt, use_json_mode=True):
-        """파이널봇 패턴: requests + system_instruction + response_mime_type + Retry 로직"""
+        """Gemini API 동기 호출 + 쿨다운/할당량 사전 차단 + 지수 백오프"""
+        # [패치] Gemini API 쿨다운 및 일일 할당량 사전 체크
+        if self.state_manager:
+            if self.state_manager.is_gemini_in_cooldown():
+                logging.warning("[TrendHunter 쿨다운] Gemini API 냉각 중. 호출 스킵.")
+                return ""
+            if not self.state_manager.check_and_increment_gemini_call():
+                logging.warning("[TrendHunter 할당량 초과] 일일 호출 한도 초과. 호출 스킵.")
+                return ""
+        
         url = f"{self.base_url}/{self.model_flash}:generateContent?key={self.api_key}"
         headers = {'Content-Type': 'application/json'}
         
@@ -30,15 +40,28 @@ class TrendHunter:
             try:
                 response = requests.post(url, headers=headers, json=payload, timeout=60)
                 
+                # [패치] 재시도 불가 클라이언트 오류 - 즉시 중단 + 쿨다운
+                if response.status_code in [400, 401, 403]:
+                    logging.error(f"TrendHunter API 인증/권한 오류 ({response.status_code}). 1시간 쿨다운.")
+                    if self.state_manager:
+                        self.state_manager.set_gemini_cooldown(3600)
+                    return ""
+                
                 if response.status_code == 429:
-                    logging.warning(f"TrendHunter API Rate Limit (429). 10초 대기... (시도 {attempt+1})")
-                    time.sleep(10)
+                    logging.warning(f"TrendHunter API Rate Limit (429). 대기 후 재시도... (시도 {attempt+1})")
+                    if attempt >= max_retries - 1:
+                        if self.state_manager:
+                            self.state_manager.set_gemini_cooldown(3600)
+                        return ""
+                    time.sleep(10 * (attempt + 1))
                     continue
                     
                 if response.status_code >= 500:
-                    logging.warning(f"TrendHunter API 서버 오류 ({response.status_code}). 10초 대기... (시도 {attempt+1})")
-                    time.sleep(10)
-                    continue
+                    logging.warning(f"TrendHunter API 서버 오류 ({response.status_code}). 대기 후 재시도... (시도 {attempt+1})")
+                    if attempt < max_retries - 1:
+                        time.sleep(10 * (attempt + 1))
+                        continue
+                    return ""
                     
                 response.raise_for_status()
                 data = response.json()
@@ -50,10 +73,10 @@ class TrendHunter:
             except requests.exceptions.RequestException as e:
                 logging.warning(f"TrendHunter API 통신 오류 발생 (시도 {attempt+1}): {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(10)
+                    time.sleep(10 * (attempt + 1))
                 else:
                     logging.error("TrendHunter API 최대 재시도 횟수 초과.")
-                    raise e
+                    return ""  # [패치] raise 대신 안전한 반환
         return ""
 
     async def _call_gemini(self, prompt, use_json_mode=True):

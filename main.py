@@ -21,11 +21,26 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-async def handle_api_error(e, broker, bot):
+async def handle_api_error(e, broker, bot, state_manager=None):
     logging.error(f"⚠️ [API 통신 장애 감지] KISAPIError: {e}")
-    # [패치] 서버가 UTC여도 무조건 한국 시간(KST) 기준으로 판단하도록 고정
     kst = pytz.timezone('Asia/Seoul')
     now = datetime.now(kst)
+    
+    # KIS API 연속 실패 처리
+    failures = 0
+    if state_manager:
+        # [수정] 이미 쿨다운 중이면 카운터를 추가로 올리지 않음 (카운터 무한 누적 방지)
+        if state_manager.is_kis_in_cooldown():
+            logging.info("⚠️ KIS API 쿨다운 중. 추가 알림 생략.")
+        else:
+            failures = state_manager.record_kis_failure()
+            if failures >= 3:
+                state_manager.set_kis_cooldown(900)  # 15분 쿨다운
+                msg = f"⚠️ KIS API 연속 {failures}회 실패. 15분 동안 API 호출을 차단합니다."
+                logging.warning(msg)
+                await bot.send_notification(msg)
+            else:
+                logging.warning(f"⚠️ [일시적 KIS 오류] {failures}회 연속 실패 중. (3회 미만이면 알림 생략)")
     
     is_night_maintenance = False
     if now.hour == 23 and now.minute >= 30:
@@ -40,7 +55,7 @@ async def handle_api_error(e, broker, bot):
             target = now.replace(hour=8, minute=0, second=0, microsecond=0)
             
         sleep_seconds = (target - now).total_seconds()
-        msg = f"🛠️ **[API 통신 장애]** 증권사 서버 점검이 감지되었습니다.\n다음 날 아침 8시까지 봇을 수면 모드(Hibernation)로 전환합니다.\n(예상 대기: {sleep_seconds/3600:.1f}시간)"
+        msg = f"🛠️ [API 통신 장애] 증권사 서버 점검이 감지되었습니다.\n다음 날 아침 8시까지 봇을 수면 모드(Hibernation)로 전환합니다.\n(예상 대기: {sleep_seconds/3600:.1f}시간)"
         logging.warning(msg)
         await bot.send_notification(msg)
         
@@ -48,11 +63,16 @@ async def handle_api_error(e, broker, bot):
         
         logging.info("☀️ 기상 완료! KIS 토큰을 즉각 재발급받으며 세션을 복구합니다...")
         broker.auth()
-        await bot.send_notification("☀️ **[수면 해제 & 세션 복구 완료]** 양봉이가 기상하여 접속 토큰을 갱신하고 정상 작동을 재개합니다.")
+        if state_manager:
+            state_manager.record_kis_success()
+        await bot.send_notification("☀️ [수면 해제 & 세션 복구 완료] 양봉이가 기상하여 접속 토큰을 갱신하고 정상 작동을 재개합니다.")
     else:
-        msg = f"⚠️ **[일시적 서버 과부하]** 주간 API 장애가 발생했습니다. (스케줄러에 의한 백그라운드 태스크이므로 다음 스케줄에 재시도합니다.)"
-        logging.warning(msg)
-        await bot.send_notification(msg)
+        # 야간 점검이 아닌 일반 주간 장애 시
+        if state_manager and state_manager.is_kis_in_cooldown():
+            logging.info("⚠️ KIS API 쿨다운 중. 추가 알림 생략.")
+        else:
+            # 쿨다운 상태가 아닌 단순 실패 시 (3회 미만)
+            logging.warning("⚠️ [일시적 서버 과부하] KIS API 오류 발생. (텔레그램 알림 생략)")
 
 
 async def run_market_surveillance(state_manager, broker, data_provider, council, bot, rebalancer):
@@ -61,41 +81,64 @@ async def run_market_surveillance(state_manager, broker, data_provider, council,
         if state_manager.state.get("is_emergency_stop", False):
             logging.warning("🚨 [긴급] 패닉 모드가 활성화되어 있습니다. 감시 태스크를 스킵합니다.")
             return
+        
+        # [패치] KIS API 쿨다운 중이면 태스크 스킵 (불필요한 재시도 방지)
+        if state_manager.is_kis_in_cooldown():
+            logging.info("⚠️ KIS API 쿨다운 중. 시장 감시 태스크를 스킵합니다.")
+            return
             
         logging.info("🔍 [스케줄링 태스크] 정기 시장 감시 및 잔고 추적을 시작합니다...")
         market_data = await data_provider.get_latest_data(bot)
         balance_data = broker.get_balance()
         
-        # --- 🎯 [Smart DRIP] 배당금 감지 로직 ---
+        # --- 🎯 [Smart DRIP] 배당금 감지 로직 (하드코딩 방식 - AI 호출 없음) ---
         current_cash = balance_data.get("cash", 0)
         last_cash = state_manager.state.get("last_cash_balance", current_cash)
         cash_diff = current_cash - last_cash
         
         if cash_diff >= 10000:
             logging.info(f"💰 현금 급증 감지: +{cash_diff:,}원 (배당금 등)")
-            decision_drip = await council.generate_drip_decision(state_manager, balance_data, cash_diff)
+            # [패치] AI 호출 제거: 목표 비중 대비 가장 부족한 종목에 자동 투자 (하드코딩)
+            from config import ASSET_TICKERS
+            config_assets = state_manager.portfolio_config.get("assets", [])
+            holdings = {item.get("pdno", ""): float(item.get("evlu_amt", 0)) for item in balance_data.get("stocks", [])}
+            total_value = balance_data.get("total_value", 1)
             
-            if decision_drip and "target_asset" in decision_drip:
-                target = decision_drip["target_asset"]
-                reason = decision_drip["reason"]
-                from config import ASSET_TICKERS
-                ticker = ASSET_TICKERS.get(target)
+            # 각 종목의 목표 비중 vs 현재 비중 차이를 계산하여 가장 부족한 종목 선택
+            best_target = None
+            best_gap = -999
+            for asset in config_assets:
+                ticker = ASSET_TICKERS.get(asset["name"])
+                if not ticker:
+                    continue
+                target_pct = asset.get("target_weight", 0)
+                current_val = holdings.get(ticker, 0)
+                current_pct = (current_val / total_value * 100) if total_value > 0 else 0
+                gap = target_pct - current_pct  # 양수이면 부족
+                if gap > best_gap:
+                    best_gap = gap
+                    best_target = {"name": asset["name"], "ticker": ticker}
+            
+            if best_target and best_gap > 0.5:  # 0.5% 이상 부족한 경우만 매수
+                ticker = best_target["ticker"]
                 price = broker.get_price(ticker)
-                
-                if ticker and price > 0:
+                if price > 0:
                     qty = int(cash_diff / price)
                     if qty > 0:
-                        logging.info(f"[Smart DRIP] {target} {qty}주 매수 스나이핑 실행")
+                        logging.info(f"[Smart DRIP] {best_target['name']} {qty}주 매수 스나이핑 실행")
                         broker.place_order(ticker, qty, "BUY")
-                        await bot.send_notification(f"🎯 **[배당금 스마트 스나이핑 (DRIP)]**\n\n새로운 현금(배당금) **{cash_diff:,}원**이 입금되었습니다!\n양봉이가 가장 저평가된 **{target}** {qty}주를 추가 매수했습니다.\n\n💡 AI 판단 원인: {reason}")
+                        await bot.send_notification(
+                            f"🎯 [DRIP 스나이핑]\n\n"
+                            f"새로운 현금(배당금) {cash_diff:,}원이 입금되었습니다!\n"
+                            f"목표 비중 대비 가장 부족한 {best_target['name']} {qty}주를 추가 매수했습니다."
+                        )
         
         # 현금 잔고 업데이트
         state_manager.state["last_cash_balance"] = balance_data.get("cash", 0)
         state_manager.save_state()
         
-        # --- 시장 이상 감지 (Crash Check) ---
+        # --- 시장 이상 감지 (Crash Check) - 하드코딩 안전장치만 작동 (패치: AI 호출 제거) ---
         from config import ASSET_TICKERS
-        # 매핑용 딕셔너리
         name_map = {
             "NIKKEI225": "일본니케이225", "CSI300": "차이나CSI300", "K200TR": "200TR",
             "NASDAQ100": "미국나스닥100", "NIFTY50": "인도Nifty", "DIVIDEND_DOW": "미국배당다우존스",
@@ -104,39 +147,28 @@ async def run_market_surveillance(state_manager, broker, data_provider, council,
 
         for eng_name, info in market_data.items():
             if isinstance(info, dict) and info.get("is_real_crash", False):
-                # [모듈 9] 변동성 브레이크 트리거
                 kor_name = name_map.get(eng_name)
                 ticker = ASSET_TICKERS.get(kor_name) if kor_name else None
                 
                 if ticker and not state_manager.is_ticker_in_crisis(ticker):
-                    # [알림] 실제 자산 폭락 시에만 AI 위원회 소집 알림 발송
                     await bot.send_notification(
-                        f"🚨 **[시장 긴급 상황 발생]**\n\n"
-                        f"실제 자산인 **{kor_name}({ticker})** 종목의 폭락이 2차 검증을 통해 확인되었습니다.\n"
-                        f"즉시 보유 비중 50%를 매도(브레이크)하고, AI 위원회를 소집하여 전체 포트폴리오 긴급 리밸런싱을 시작합니다."
+                        f"🚨 [시장 긴급 상황 발생]\n\n"
+                        f"실제 자산인 {kor_name}({ticker}) 종목의 폭락이 2차 검증을 통해 확인되었습니다.\n"
+                        f"즉시 보유 비중 50%를 매도(브레이크)하고 위기 모드로 전환합니다.\n"
+                        f"(포트폴리오 재배치는 오후 3시 정규 리밸런싱 시점에 AI 위원회가 수행합니다.)"
                     )
                     
                     logging.critical(f"🚨 [변동성 브레이크] {kor_name}({ticker}) 폭락 감지! 브레이크를 가동합니다.")
                     state_manager.set_crisis_mode(ticker, True)
                     await rebalancer.execute_emergency_brake(ticker, kor_name)
-                    
-                    # 브레이크 작동 후 즉시 긴급 리밸런싱 (나머지 자산 재배치)
-                    logging.info(f"🧠 [긴급 회의] {kor_name} 폭락에 따른 AI 위원회 리밸런싱 전략 수립 시작...")
-                    decision = await council.generate_rebalance_decision(state_manager, market_data, balance_data)
-                    orders = rebalancer.calculate_emergency_orders(decision["weights"])
-                    await rebalancer.execute_rebalancing(orders) # 긴급은 TLH 패스
-                    
-                    await state_manager.add_meeting_record(
-                        f"🚨 [변동성 브레이크 발동] {kor_name} 폭락 대응 회의록:\n{decision['minutes']}",
-                        summarizer_fn=council.summarize_instructions
-                    )
-                    logging.info(f"✅ [긴급 대피 완료] {kor_name} 폭락 대응 세션이 종료되었습니다.")
+                    # [패치] AI 위원회 긴급 소집 제거 - 브레이크만 작동시키고, 재배치는 15시 정규 리밸런싱에 위임
+                    logging.info(f"✅ [변동성 브레이크 완료] {kor_name} 50% 매도 실행. 재배치는 15시 정규 리밸런싱에서 수행됩니다.")
         
         # 스케줄 종료 후 메모리 최적화
         state_manager.optimize_memory()
             
     except KISAPIError as e:
-        await handle_api_error(e, broker, bot)
+        await handle_api_error(e, broker, bot, state_manager)
     except Exception as e:
         logging.error(f"Error in market surveillance task: {e}")
 
@@ -228,7 +260,7 @@ async def run_daily_rebalance(state_manager, broker, data_provider, council, bot
         state_manager.optimize_memory()
             
     except KISAPIError as e:
-        await handle_api_error(e, broker, bot)
+        await handle_api_error(e, broker, bot, state_manager)
     except Exception as e:
         logging.error(f"Error in daily rebalance task: {e}")
 
@@ -360,9 +392,9 @@ async def main():
     state_manager = StateManager()
     broker = KISBroker(KIS_API_KEY, KIS_API_SECRET, f"{KIS_CANO}{KIS_ACNT_PRDT_CD}", KIS_IS_PAPER)
     data_provider = MarketDataProvider()
-    council = MultiAssetCouncil(GEMINI_API_KEY)
-    chat_parser = ChatParser(GEMINI_API_KEY)
-    trend_hunter = TrendHunter(GEMINI_API_KEY)
+    council = MultiAssetCouncil(GEMINI_API_KEY, state_manager)
+    chat_parser = ChatParser(GEMINI_API_KEY, state_manager)
+    trend_hunter = TrendHunter(GEMINI_API_KEY, state_manager)
     rebalancer = Rebalancer(broker, state_manager)
     sentinel = MarketSentinel(broker)  # 신규: 시장 구조 감시 모듈
     

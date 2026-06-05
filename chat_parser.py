@@ -3,8 +3,9 @@ import logging
 import httpx
 
 class ChatParser:
-    def __init__(self, api_key):
+    def __init__(self, api_key, state_manager=None):
         self.api_key = api_key
+        self.state_manager = state_manager
         self.model_name = 'gemini-3-flash-preview'
         self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
         
@@ -50,6 +51,17 @@ class ChatParser:
 }}
 """
         try:
+            # [패치] Gemini API 쿨다운 및 일일 할당량 사전 체크
+            if self.state_manager:
+                if self.state_manager.is_gemini_in_cooldown():
+                    logging.warning("[ChatParser 쿨다운] Gemini API 냉각 중. 호출 스킵.")
+                    return {"action": "CHIT_CHAT", "new_portfolio_config": None,
+                            "reply_message": "회장님! 현재 AI 서버가 잠시 휴식 중입니다. 잠시 후 다시 말씀해 주세요!🙏"}
+                if not self.state_manager.check_and_increment_gemini_call():
+                    logging.warning("[ChatParser 할당량 초과] 일일 호출 한도 초과. 호출 스킵.")
+                    return {"action": "CHIT_CHAT", "new_portfolio_config": None,
+                            "reply_message": "회장님! 오늘 AI 분석 할당량을 모두 소진했습니다. 내일 다시 말씀해 주세요!💪"}
+            
             payload = {"contents": [{"parts": [{"text": prompt}]}]}
             max_retries = 3
             import asyncio
@@ -60,9 +72,21 @@ class ChatParser:
                         resp = await client.post(self.api_url, json=payload)
                     
                     if resp.status_code in [429, 500, 502, 503, 504]:
-                        logging.warning(f"ChatParser API 오류 ({resp.status_code}). 10초 대기... (시도 {attempt+1})")
-                        await asyncio.sleep(10)
+                        logging.warning(f"ChatParser API 오류 ({resp.status_code}). 대기 후 재시도... (시도 {attempt+1})")
+                        # [패치] 429 반복 시 쿨다운 가동
+                        if resp.status_code == 429 and attempt >= max_retries - 1:
+                            if self.state_manager:
+                                self.state_manager.set_gemini_cooldown(3600)
+                        await asyncio.sleep(10 * (attempt + 1))  # [패치] 지수 백오프
                         continue
+                    
+                    # [패치] 재시도 불가 클라이언트 오류 - 즉시 중단 + 쿨다운
+                    if resp.status_code in [400, 401, 403]:
+                        logging.error(f"ChatParser API 인증/권한 오류 ({resp.status_code}). 1시간 쿨다운.")
+                        if self.state_manager:
+                            self.state_manager.set_gemini_cooldown(3600)
+                        return {"action": "CHIT_CHAT", "new_portfolio_config": None,
+                                "reply_message": "회장님! AI 서버 인증에 문제가 생겼습니다. 잠시 후 다시 시도해 주세요.🙏"}
                         
                     resp.raise_for_status()
                     data = resp.json()
@@ -81,11 +105,9 @@ class ChatParser:
                 except httpx.RequestError as e:
                     logging.warning(f"ChatParser API 통신 오류 발생 (시도 {attempt+1}): {e}")
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(10)
+                        await asyncio.sleep(10 * (attempt + 1))  # [패치] 지수 백오프
                     else:
-                        raise e
-                        
-            raise Exception("ChatParser API 최대 재시도 횟수 초과.")
+                        break  # [패치] raise 대신 break로 안전하게 탈출
         except Exception as e:
             logging.error(f"ChatParser 분석 오류: {e}")
             return {

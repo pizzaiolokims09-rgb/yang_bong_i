@@ -4,8 +4,9 @@ import asyncio
 import requests
 
 class MultiAssetCouncil:
-    def __init__(self, api_key):
+    def __init__(self, api_key, state_manager=None):
         self.api_key = api_key
+        self.state_manager = state_manager
         # [파이널봇 패턴 적용] 상황별 모델 분리
         self.model_thinking = 'gemini-3.1-pro-preview'    # 전략 회의 (정밀 판단)
         self.model_flash = 'gemini-3-flash-preview'       # 경량 작업 (초고속)
@@ -36,12 +37,21 @@ class MultiAssetCouncil:
 """
 
     def _call_api_sync(self, prompt, model_type="flash", use_json_mode=True):
-        """파이널봇 패턴: requests 동기 호출 + system_instruction + response_mime_type + 재시도/폴백 로직"""
+        """Gemini API 동기 호출 + 쿨다운/할당량 사전 차단 + 지수 백오프 재시도"""
         if not self.api_key:
             return {}
         
+        # [패치] Gemini API 쿨다운 및 일일 할당량 사전 체크
+        if self.state_manager:
+            if self.state_manager.is_gemini_in_cooldown():
+                logging.warning("[Gemini 쿨다운] API 냉각 기간 중이므로 호출을 건너뜀니다.")
+                return ""
+            if not self.state_manager.check_and_increment_gemini_call():
+                logging.warning("[Gemini 할당량 초과] 일일 최대 호출 횟수를 초과하여 호출을 건너뜀니다.")
+                return ""
+        
         target_model = self.model_thinking if model_type == "thinking" else self.model_flash
-        fallback_model = self.model_flash  # 503/Timeout 지속 시 빠르고 가벼운 모델로 우회
+        fallback_model = self.model_flash
         
         headers = {'Content-Type': 'application/json'}
         gen_config = {"temperature": 0.1}
@@ -59,7 +69,6 @@ class MultiAssetCouncil:
         
         import time
         for attempt in range(max_retries):
-            # 1, 2회차는 원래 타겟 모델, 3회차(마지막)는 Fallback 모델 사용
             current_model = target_model if attempt < 2 else fallback_model
             url = f"{self.base_url}/{current_model}:generateContent?key={self.api_key}"
             
@@ -68,15 +77,29 @@ class MultiAssetCouncil:
             try:
                 response = requests.post(url, headers=headers, json=payload, timeout=timeout_val)
                 
+                # [패치] 재시도 불가 클라이언트 오류 (400/401/403) - 즉시 중단 + 쿨다운
+                if response.status_code in [400, 401, 403]:
+                    logging.error(f"Gemini API 인증/권한 오류 ({response.status_code}). 1시간 쿨다운 가동.")
+                    if self.state_manager:
+                        self.state_manager.set_gemini_cooldown(3600)
+                    return ""
+                
                 if response.status_code == 429:
-                    logging.warning(f"Gemini API Rate Limit (429). 15초 대기 후 재시도... (시도 {attempt+1})")
-                    time.sleep(15)
+                    logging.warning(f"Gemini API Rate Limit (429). 대기 후 재시도... (시도 {attempt+1})")
+                    if attempt >= max_retries - 1:
+                        if self.state_manager:
+                            self.state_manager.set_gemini_cooldown(3600)
+                        logging.error("Gemini API 429 반복 발생. 1시간 쿨다운 가동.")
+                        return ""
+                    time.sleep(15 * (attempt + 1))
                     continue
                 
                 if response.status_code >= 500:
-                    logging.warning(f"Gemini API 서버 오류 ({response.status_code}). 10초 대기 후 재시도... (시도 {attempt+1})")
-                    time.sleep(10)
-                    continue
+                    logging.warning(f"Gemini API 서버 오류 ({response.status_code}). 대기 후 재시도... (시도 {attempt+1})")
+                    if attempt < max_retries - 1:
+                        time.sleep(10 * (attempt + 1))
+                        continue
+                    return ""
                     
                 response.raise_for_status()
                 data = response.json()
@@ -88,10 +111,10 @@ class MultiAssetCouncil:
             except requests.exceptions.RequestException as e:
                 logging.warning(f"Gemini API 네트워크 오류 또는 타임아웃 발생 (시도 {attempt+1}): {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(10)
+                    time.sleep(10 * (attempt + 1))
                 else:
                     logging.error("Gemini API 최대 재시도 횟수 초과. 분석 실패.")
-                    raise e
+                    return ""  # [패치] raise 대신 빈 문자열 반환 (상위 태스크 중단 방지)
         return ""
 
     async def _call_gemini(self, prompt, model_type="flash", use_json_mode=True):

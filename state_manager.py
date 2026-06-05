@@ -1,5 +1,6 @@
 import json
 import os
+import logging
 import gc
 from datetime import datetime
 import pytz
@@ -7,6 +8,7 @@ import pytz
 class StateManager:
     DAILY_MAX_ORDERS = 200
     DAILY_MAX_VOLUME_RATIO = 4.0
+    GEMINI_DAILY_MAX_CALLS = 100  # Gemini API 일일 최대 호출 한도
 
     def __init__(self, state_file="state.json", config_file="portfolio_config.json", history_file="meeting_history.json"):
         self.state_file = state_file
@@ -35,6 +37,12 @@ class StateManager:
                     if "is_bottom_fishing_mode" not in data: data["is_bottom_fishing_mode"] = False
                     if "max_exposure_pct" not in data: data["max_exposure_pct"] = 100
                     if "foreign_futures_history" not in data: data["foreign_futures_history"] = []
+                    # [패치] API 과금 방지용 쿨다운/할당량 필드
+                    if "gemini_cooldown_until" not in data: data["gemini_cooldown_until"] = ""
+                    if "kis_cooldown_until" not in data: data["kis_cooldown_until"] = ""
+                    if "gemini_daily_call_count" not in data: data["gemini_daily_call_count"] = 0
+                    if "gemini_daily_call_date" not in data: data["gemini_daily_call_date"] = ""
+                    if "kis_consecutive_failures" not in data: data["kis_consecutive_failures"] = 0
                     return data
             except:
                 pass
@@ -55,7 +63,12 @@ class StateManager:
             "pending_retry_orders": [],
             "is_bottom_fishing_mode": False,
             "max_exposure_pct": 100,
-            "foreign_futures_history": []
+            "foreign_futures_history": [],
+            "gemini_cooldown_until": "",
+            "kis_cooldown_until": "",
+            "gemini_daily_call_count": 0,
+            "gemini_daily_call_date": "",
+            "kis_consecutive_failures": 0
         }
 
     def save_state(self):
@@ -297,4 +310,76 @@ class StateManager:
         context = "[영구 통합 지침]\n" + "\n".join(p_ins) if p_ins else ""
         context += "\n\n[최근 추가 지침]\n" + "\n".join(r_ins) if r_ins else ""
         return context
+
+    # --- 4. API 과금 방지: 쿨다운 및 할당량 제어 ---
+    def is_gemini_in_cooldown(self):
+        """Gemini API 쿨다운 중인지 확인"""
+        cooldown_str = self.state.get("gemini_cooldown_until", "")
+        if not cooldown_str:
+            return False
+        kst = pytz.timezone('Asia/Seoul')
+        try:
+            cooldown_until = datetime.fromisoformat(cooldown_str)
+            if cooldown_until.tzinfo is None:
+                cooldown_until = kst.localize(cooldown_until)
+            return datetime.now(kst) < cooldown_until
+        except Exception:
+            return False
+
+    def is_kis_in_cooldown(self):
+        """KIS API 쿨다운 중인지 확인"""
+        cooldown_str = self.state.get("kis_cooldown_until", "")
+        if not cooldown_str:
+            return False
+        kst = pytz.timezone('Asia/Seoul')
+        try:
+            cooldown_until = datetime.fromisoformat(cooldown_str)
+            if cooldown_until.tzinfo is None:
+                cooldown_until = kst.localize(cooldown_until)
+            return datetime.now(kst) < cooldown_until
+        except Exception:
+            return False
+
+    def set_gemini_cooldown(self, seconds):
+        """Gemini API 쿨다운 기간 설정 (초 단위)"""
+        from datetime import timedelta
+        kst = pytz.timezone('Asia/Seoul')
+        until = datetime.now(kst) + timedelta(seconds=seconds)
+        self.state["gemini_cooldown_until"] = until.isoformat()
+        self.save_state()
+        logging.warning(f"[Gemini 쿨다운 설정] {seconds}초 동안 API 호출을 중단합니다. (해제: {until.strftime('%H:%M:%S')})")
+
+    def set_kis_cooldown(self, seconds):
+        """KIS API 쿨다운 기간 설정 (초 단위)"""
+        from datetime import timedelta
+        kst = pytz.timezone('Asia/Seoul')
+        until = datetime.now(kst) + timedelta(seconds=seconds)
+        self.state["kis_cooldown_until"] = until.isoformat()
+        self.save_state()
+        logging.warning(f"[KIS 쿨다운 설정] {seconds}초 동안 API 호출을 중단합니다. (해제: {until.strftime('%H:%M:%S')})")
+
+    def check_and_increment_gemini_call(self):
+        """Gemini API 일일 호출 횟수 확인 및 증가. 한도 초과 시 False 반환"""
+        kst = pytz.timezone('Asia/Seoul')
+        today_str = datetime.now(kst).strftime("%Y-%m-%d")
+        if self.state.get("gemini_daily_call_date") != today_str:
+            self.state["gemini_daily_call_date"] = today_str
+            self.state["gemini_daily_call_count"] = 0
+        if self.state["gemini_daily_call_count"] >= self.GEMINI_DAILY_MAX_CALLS:
+            return False
+        self.state["gemini_daily_call_count"] += 1
+        self.save_state()
+        return True
+
+    def record_kis_failure(self):
+        """KIS API 연속 실패 횟수 기록. 반환값: 현재 연속 실패 횟수"""
+        self.state["kis_consecutive_failures"] = self.state.get("kis_consecutive_failures", 0) + 1
+        self.save_state()
+        return self.state["kis_consecutive_failures"]
+
+    def record_kis_success(self):
+        """KIS API 성공 시 연속 실패 횟수 초기화"""
+        if self.state.get("kis_consecutive_failures", 0) > 0:
+            self.state["kis_consecutive_failures"] = 0
+            self.save_state()
 

@@ -24,9 +24,13 @@ class KISBroker:
         self.bot = None # 긴급 텔레그램 연동용
 
     def _safe_request(self, method, url, **kwargs):
-        """네트워크 오류 및 서버 측 HTTP 오류를 한꺼번에 잡아서 커스텀 예외 발생 + 자동 재시도(Max 5회)"""
-        max_retries = 5
-        retry_delay = 1
+        """네트워크 오류 및 서버 측 HTTP 오류를 한꺼번에 잡아서 커스텀 예외 발생 + 자동 재시도(Max 3회)"""
+        # [패치] KIS API 쿨다운 중이면 불필요한 재시도 없이 즉시 차단
+        if self.state_manager and self.state_manager.is_kis_in_cooldown():
+            raise KISAPIError("KIS API 쿨다운 중입니다. 잠시 후 자동으로 재개됩니다.")
+        
+        max_retries = 3  # [패치] 5회 → 3회로 축소
+        retry_delay = 2  # [패치] 1초 → 2초 (지수 백오프 기본값)
         
         for attempt in range(max_retries):
             try:
@@ -60,6 +64,15 @@ class KISBroker:
                         pass
                     return res
                 
+                # [패치] HTTP 403 접근 차단(EGW00133 등) 즉시 쿨다운 가동, 재시도 없음
+                if res.status_code == 403:
+                    error_text = res.text[:200]
+                    logging.error(f"🚫 [KIS API 403 차단] 접근이 거부되었습니다. 15분 쿨다운 가동. 응답: {error_text}")
+                    if self.state_manager:
+                        self.state_manager.set_kis_cooldown(900)
+                        self.state_manager.record_kis_failure()
+                    raise KISAPIError(f"HTTP 403 Forbidden: {error_text}")
+                
                 # 토큰 만료 에러 감지 (HTTP 500으로 내려올 경우)
                 if res.status_code == 500 and ("EGW00123" in res.text or "만료된 token" in res.text):
                     logging.info("🔄 [토큰 만료 감지] HTTP 500 상태에서 토큰 만료를 감지했습니다. 즉시 재발급을 시도합니다.")
@@ -72,7 +85,7 @@ class KISBroker:
                 if res.status_code in [429, 500, 502, 503, 504]:
                     logging.warning(f"⚠️ [KIS API 일시적 오류] ({res.status_code}) 서버 부하 감지. {attempt + 1}/{max_retries}회차 재시도 중... (URL: {url}, MSG: {res.text[:100]})")
                     if attempt < max_retries - 1:
-                        time.sleep(retry_delay)
+                        time.sleep(retry_delay * (2 ** attempt))  # [패치] 지수 백오프
                         continue
                         
                 # 재시도 불가능한 에러이거나 최대 횟수 초과 시 예외 발생
@@ -81,8 +94,10 @@ class KISBroker:
             except requests.exceptions.RequestException as e:
                 logging.warning(f"🌐 [네트워크 오류] ({str(e)}) 연결 실패. {attempt + 1}/{max_retries}회차 재시도 중...")
                 if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
+                    time.sleep(retry_delay * (2 ** attempt))  # [패치] 지수 백오프
                     continue
+                if self.state_manager:
+                    self.state_manager.record_kis_failure()
                 raise KISAPIError(f"Network Error: KIS API 연결 실패 ({str(e)})")
         
         # 이론적으로 여기 도달하면 안 됨 (최종 에러가 raise되어야 함)
@@ -100,7 +115,10 @@ class KISBroker:
         res_data = res.json()
         self.token = res_data["access_token"]
         self.token_exp = time.time() + res_data["expires_in"] - 60
-        logging.info("📢 KIS API 인증 토탄 발급 성공")
+        # [패치] 토큰 발급 성공 시 연속 실패 카운터 초기화
+        if self.state_manager:
+            self.state_manager.record_kis_success()
+        logging.info("📢 KIS API 인증 토큰 발급 성공")
 
     def _get_headers(self, tr_id):
         headers = {
@@ -118,7 +136,9 @@ class KISBroker:
         [고도화] 연속조회(페이징) 처리: 보유 종목이 많을 경우 한 번의 API 호출로
         전부 가져오지 못하므로, CTX_AREA_FK100/NK100 키를 이용해 다음 페이지를 반복 조회합니다.
         """
-        if time.time() > self.token_exp: self.auth()
+        if time.time() > self.token_exp:
+            logging.info("🔄 [토큰 만료] 잔고 조회 전 토큰 재발급을 시도합니다.")
+            self.auth()
         
         tr_id = "VTTC8434R" if self.is_paper else "TTTC8434R"
         url = f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
@@ -177,6 +197,10 @@ class KISBroker:
         
         if page > 0:
             logging.info(f"📄 [잔고 조회 완료] 총 {page + 1}페이지, {len(all_output1)}개 종목 데이터 수집 완료")
+        
+        # [수정] 잔고 조회 성공 시 연속 실패 카운터 초기화 (쿨다운 해제 후 카운터 쌓임 방지)
+        if self.state_manager:
+            self.state_manager.record_kis_success()
         
         try:
             # [output2] 계좌 전체 요약 정보
