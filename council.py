@@ -85,13 +85,15 @@ class MultiAssetCouncil:
                     return ""
                 
                 if response.status_code == 429:
+                    import random
                     logging.warning(f"Gemini API Rate Limit (429). 대기 후 재시도... (시도 {attempt+1})")
                     if attempt >= max_retries - 1:
                         if self.state_manager:
-                            self.state_manager.set_gemini_cooldown(3600)
-                        logging.error("Gemini API 429 반복 발생. 1시간 쿨다운 가동.")
+                            self.state_manager.set_gemini_cooldown(300)  # [패치] 1시간→5분으로 단축 (하루 1~2회 호출 패턴에 맞춤)
+                        logging.error("Gemini API 429 반복 발생. 5분 쿨다운 가동.")
                         return ""
-                    time.sleep(15 * (attempt + 1))
+                    jitter = random.uniform(1, 5)
+                    time.sleep(15 * (attempt + 1) + jitter)  # [패치] Jitter 추가
                     continue
                 
                 if response.status_code >= 500:

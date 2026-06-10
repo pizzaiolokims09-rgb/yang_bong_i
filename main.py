@@ -251,9 +251,17 @@ async def run_daily_rebalance(state_manager, broker, data_provider, council, bot
             await bot.send_notification(report_msg)
         else:
             logging.info(f"Holding. Reason: {decision['minutes']}")
-            report_msg = (f"📅 **[일일 AI 위원회 회의 결과 보고]**\n\n"
-                          f"AI 위원회의 분석 결과, 현재 포트폴리오 비중이 목표치와 매우 일치하여 **이번 회차는 매매 없이 'HOLD(관망)'**를 결정하였습니다.\n\n"
-                          f"💡 **위원회 판단 근거**:\n{decision['minutes']}")
+            # [패치] 쿨다운 스킵과 정상 HOLD를 구분하여 알림
+            is_cooldown_skip = "쿨다운" in decision.get("minutes", "") or "할당량" in decision.get("minutes", "")
+            if is_cooldown_skip:
+                report_msg = (f"⏸️ [AI 위원회 일시 중단]\n\n"
+                              f"Gemini API 서버가 일시적으로 응답하지 않아(Rate Limit) 이번 회차 분석을 건너뛰었습니다.\n"
+                              f"기존 포트폴리오 비중을 유지(HOLD)하며, 5분 후 자동 복구됩니다.\n\n"
+                              f"(일일 호출 한도 문제가 아닌 Gemini 서버 측 순간 트래픽 제한입니다.)")
+            else:
+                report_msg = (f"📅 [일일 AI 위원회 회의 결과 보고]\n\n"
+                              f"AI 위원회의 분석 결과, 현재 포트폴리오 비중이 목표치와 매우 일치하여 이번 회차는 매매 없이 'HOLD(관망)'를 결정하였습니다.\n\n"
+                              f"💡 위원회 판단 근거:\n{decision['minutes']}")
             await bot.send_notification(report_msg)
             
         # 스케줄 종료 후 메모리 최적화
