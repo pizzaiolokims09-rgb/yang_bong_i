@@ -432,6 +432,7 @@ async def main():
         retry_failed_orders,
         trigger='cron',
         minute='*/15',
+        second=10,  # [패치] API 병목 방지를 위해 10초 딜레이
         day_of_week='mon-fri',
         args=[broker, state_manager, bot]
     )
@@ -443,6 +444,7 @@ async def main():
         day_of_week='mon-fri',
         hour='9-14',
         minute='0,15,30,45',
+        second=0,   # 정각 실행
         args=[state_manager, broker, data_provider, council, bot, rebalancer],
         id='market_surveillance_task'
     )
@@ -454,6 +456,7 @@ async def main():
         day_of_week='mon-fri',
         hour=15, 
         minute=0, 
+        second=20,  # [패치] API 병목 방지를 위해 20초 딜레이
         args=[state_manager, broker, data_provider, council, bot, rebalancer],
         id='daily_rebalance_task'
     )

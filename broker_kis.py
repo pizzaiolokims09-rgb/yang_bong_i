@@ -53,9 +53,11 @@ class KISBroker:
                             
                         # KIS API 특성상 200 OK라도 rt_cd가 1이고 초과 메시지가 올 수 있음
                         if data.get("rt_cd") == "1" and ("초과" in data.get("msg1", "") or "초당" in data.get("msg1", "")):
+                            import random
+                            jitter = random.uniform(0.1, 0.5)
                             logging.warning(f"⚠️ [KIS API 일시적 오류] 초당 거래건수 초과 감지. {attempt + 1}/{max_retries}회차 재시도 중... (MSG: {data.get('msg1')})")
                             if attempt < max_retries - 1:
-                                time.sleep(retry_delay)
+                                time.sleep(retry_delay + jitter)
                                 continue
                             raise KISAPIError(f"Rate Limit Exceeded: {data.get('msg1')}")
                     except Exception as e:
@@ -83,9 +85,11 @@ class KISBroker:
 
                 # 재시도 대상 에러 코드 (429: Too Many Requests, 500-504: Server Errors)
                 if res.status_code in [429, 500, 502, 503, 504]:
+                    import random
+                    jitter = random.uniform(0.1, 0.5)
                     logging.warning(f"⚠️ [KIS API 일시적 오류] ({res.status_code}) 서버 부하 감지. {attempt + 1}/{max_retries}회차 재시도 중... (URL: {url}, MSG: {res.text[:100]})")
                     if attempt < max_retries - 1:
-                        time.sleep(retry_delay * (2 ** attempt))  # [패치] 지수 백오프
+                        time.sleep(retry_delay * (2 ** attempt) + jitter)  # [패치] 지수 백오프 + Jitter
                         continue
                         
                 # 재시도 불가능한 에러이거나 최대 횟수 초과 시 예외 발생
@@ -193,7 +197,7 @@ class KISBroker:
             
             if page > 1:
                 logging.info(f"📄 [잔고 연속조회] {page}페이지 추가 조회 중... (누적 {len(all_output1)}건)")
-            time.sleep(0.3)  # API Rate Limit 대응
+            time.sleep(1.0)  # [패치] API Rate Limit 2 TPS 준수를 위해 0.3초 -> 1.0초로 상향 조정
         
         if page > 0:
             logging.info(f"📄 [잔고 조회 완료] 총 {page + 1}페이지, {len(all_output1)}개 종목 데이터 수집 완료")

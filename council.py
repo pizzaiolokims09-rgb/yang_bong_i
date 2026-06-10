@@ -185,6 +185,16 @@ class MultiAssetCouncil:
 }}"""
         try:
             text = await self._call_gemini(prompt, model_type="thinking", use_json_mode=True)
+            
+            # [수정] API 할당량 초과나 쿨다운으로 인해 빈 응답이 올 경우 JSON 파싱 에러 방지
+            if not text:
+                logging.warning("Gemini API가 빈 응답을 반환했습니다. (Rate Limit 또는 쿨다운). HOLD 처리합니다.")
+                return {
+                    "action": "HOLD",
+                    "weights": {},
+                    "minutes": "API 쿨다운 또는 할당량 초과로 인해 AI 위원회 분석을 일시적으로 건너뛰었습니다."
+                }
+                
             result = self._parse_json_response(text)
             
             return {

@@ -1,0 +1,8 @@
+May 26 09:00:00 ip-172-31-46-229 python3[153722]: 2026-05-26 09:00:00,052 - root - INFO - 🔍 [스케줄링 태스크] 정기 시장 감시 및 잔고 추적을 시작합니다...
+May 26 09:00:00 ip-172-31-46-229 python3[153722]: 2026-05-26 09:00:00,065 - root - INFO - 시장 데이터 수집 및 1차 검증(Sanity Check) 중...
+May 26 09:00:04 ip-172-31-46-229 python3[153722]: 2026-05-26 09:00:04,396 - root - INFO - 🔄 [토큰 만료 감지] HTTP 500 상태에서 토큰 만료를 감지했습니다. 즉시 재발급을 시도합니다.
+May 26 09:00:04 ip-172-31-46-229 python3[153722]: 2026-05-26 09:00:04,494 - root - ERROR - ⚠️ [API 통신 장애 감지] KISAPIError: HTTP 403 Error: KIS 서버 과부하 또는 점검 중. 최종 응답: {"error_code":"EGW00133","error_description":"접근토큰 발급 잠시 후 다시 시도하세요(1분당 1회)"}
+May 26 09:00:04 ip-172-31-46-229 python3[153722]: 2026-05-26 09:00:04,495 - root - WARNING - ⚠️ **[일시적 서버 과부하]** 주간 API 장애가 발생했습니다. (스케줄러에 의한 백그라운드 태스크이므로 다음 스케줄에 재시도합니다.)
+May 26 09:00:04 ip-172-31-46-229 python3[153722]: 2026-05-26 09:00:04,517 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8706233375:AAGvCpTeE59PbcTAIKEHyeUuHZCfztaNbwY/getUpdates "HTTP/1.1 200 OK"
+May 26 09:00:05 ip-172-31-46-229 python3[153722]: 2026-05-26 09:00:05,402 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot8706233375:AAGvCpTeE59PbcTAIKEHyeUuHZCfztaNbwY/sendMessage "HTTP/1.1 200 OK"
+May 26 09:00:05 ip-172-31-46-229 python3[153722]: 2026-05-26 09:00:05,510 - apscheduler.executors.default - INFO - Job "run_market_surveillance (trigger: cron[day_of_week='mon-fri', hour='9-14', minute='0,15,30,45'], next run at: 2026-05-26 09:15:00 KST)" executed successfully
