@@ -29,6 +29,14 @@ class YangbongBot:
         self.app.add_handler(CallbackQueryHandler(self.handle_callback, block=False))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message, block=False))
 
+    def _is_authorized(self, update: Update) -> bool:
+        from config import TELEGRAM_CHAT_ID
+        if not TELEGRAM_CHAT_ID:
+            return True
+        if not update.effective_chat:
+            return False
+        return str(update.effective_chat.id) == str(TELEGRAM_CHAT_ID)
+
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Log the error and send a telegram message to notify the developer."""
         logging.error("Exception while handling an update:", exc_info=context.error)
@@ -78,15 +86,19 @@ class YangbongBot:
             await self.app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode='Markdown')
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update): return
         await self.show_balance_info(update.message.reply_text)
 
     async def cmd_panic(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update): return
         await self.ask_panic(update.message.reply_text)
 
     async def cmd_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update): return
         await self.send_visual_report(update.message.reply_photo, update.message.reply_text)
 
     async def cmd_instruction(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update): return
         if not context.args:
             await update.message.reply_text("💡 **사용법**: `/cmd [내용]` 형태로 입력해주세요.\n예: `/cmd 금 비중은 20% 이하로 줄이지 마`", parse_mode='Markdown')
             return
@@ -102,6 +114,7 @@ class YangbongBot:
         )
 
     async def cmd_list_instructions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update): return
         p_ins = self.state_manager.state.get("permanent_instructions", [])
         r_ins = self.state_manager.state.get("recent_instructions", [])
         
@@ -125,6 +138,7 @@ class YangbongBot:
         await update.message.reply_text(text, parse_mode='Markdown')
 
     async def cmd_delete_instruction(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update): return
         if not context.args:
             await update.message.reply_text("💡 **사용법**: `/del [코드]` 형태로 입력해주세요.\n예: `/del R1` (최근 지침 1번 삭제)")
             return
@@ -148,6 +162,7 @@ class YangbongBot:
             await update.message.reply_text("❌ 잘못된 형식입니다. `/del R1`과 같이 입력해 주세요.")
 
     async def cmd_clear_instructions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update): return
         # 실수를 방지하기 위해 인자 없이 입력 시 안내만
         if not context.args or context.args[0] != '확정':
             await update.message.reply_text("🧹 **모든 지침을 초기화하시겠습니까?**\n(모든 영구/최근 지침이 즉시 삭제됩니다.)\n\n확정하시려면 `/clear 확정` 이라고 입력해주세요.")
@@ -157,6 +172,7 @@ class YangbongBot:
         await update.message.reply_text("🧹 **초기화 완료.** 양봉이의 모든 특별 지침이 비워졌습니다. 이제 백지상태에서 다시 교육을 시작합니다!")
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update): return
         keyboard = [
             [
                 InlineKeyboardButton("📊 리밸런싱 종목 분석", callback_data='rebalance_info'),
@@ -271,6 +287,7 @@ class YangbongBot:
             await text_func(text=text, parse_mode='Markdown')
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update): return
         query = update.callback_query
         data = query.data
         if data in ['rebalance_info', 'execute_now', 'trend_hunter']:
@@ -501,6 +518,7 @@ class YangbongBot:
             await query.edit_message_text(text="❌ 작업이 안전하게 취소되었습니다. 아무것도 변경되거나 실행되지 않았습니다.")
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update): return
         expecting = context.user_data.get('expecting')
         user_text = update.message.text
         
