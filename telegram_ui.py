@@ -16,7 +16,7 @@ class YangbongBot:
         self.trend_hunter = trend_hunter
         self.is_processing = False  # 동시 실행 방지 락
         
-        self.app = ApplicationBuilder().token(token).build()
+        self.app = ApplicationBuilder().token(token).connect_timeout(30.0).read_timeout(30.0).write_timeout(30.0).build()
         self.app.add_handler(CommandHandler('start', self.start, block=False))
         self.app.add_handler(CommandHandler('status', self.cmd_status, block=False))
         self.app.add_handler(CommandHandler('panic', self.cmd_panic, block=False))
@@ -631,7 +631,7 @@ class YangbongBot:
 
     def run(self):
         logging.info("Starting Telegram Bot...")
-        app = ApplicationBuilder().token(self.token).build()
+        app = ApplicationBuilder().token(self.token).connect_timeout(30.0).read_timeout(30.0).write_timeout(30.0).build()
         app.add_handler(CommandHandler("start", self.start))
         app.add_handler(CallbackQueryHandler(self.handle_callback))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
