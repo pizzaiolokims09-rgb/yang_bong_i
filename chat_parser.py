@@ -106,8 +106,14 @@ class ChatParser:
                     logging.warning(f"ChatParser API 통신 오류 발생 (시도 {attempt+1}): {e}")
                     if attempt < max_retries - 1:
                         await asyncio.sleep(10 * (attempt + 1))  # [패치] 지수 백오프
-                    else:
-                        break  # [패치] raise 대신 break로 안전하게 탈출
+
+            # [패치] 429/5xx로 모든 재시도를 소진하고 루프를 빠져나온 경우 (기존엔 None 반환)
+            logging.error("ChatParser API 최대 재시도 횟수 초과.")
+            return {
+                "action": "CHIT_CHAT",
+                "new_portfolio_config": None,
+                "reply_message": "회장님! 지금 AI 서버와 통신이 원활하지 않습니다. 잠시 후 다시 말씀해 주세요!🙏"
+            }
         except Exception as e:
             logging.error(f"ChatParser 분석 오류: {e}")
             return {

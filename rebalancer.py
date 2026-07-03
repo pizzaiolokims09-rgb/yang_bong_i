@@ -1,5 +1,4 @@
 import logging
-import time
 import pytz
 from config import ASSET_TICKERS
 
@@ -60,6 +59,11 @@ class Rebalancer:
         목표 비중과 현재 잔고를 비교하여 매매 주문 목록 생성
         Tax-Loss Harvesting(TLH) 로직 포함
         """
+        # [패치] 목표 비중이 비어있으면 '미등록 자산 정리' 로직이 전 종목을 매도하므로 즉시 중단
+        if not target_weights:
+            logging.error("❌ [주문 계산 중단] 목표 비중(target_weights)이 비어 있습니다. 전량 매도 사고 방지를 위해 아무 주문도 생성하지 않습니다.")
+            return [], [], [], []
+
         balance = self.broker.get_balance()
         total_eval = balance["total_value"]
         seed = self.state_manager.state["seed_amount"]
@@ -76,17 +80,26 @@ class Rebalancer:
                 seed = new_seed
         
         investable_total = min(total_eval, seed) if seed > 0 else total_eval
-        
+
+        # [패치] MarketSentinel의 가변 현금 비중(외국인 선물 대량 순매도 시 축소)을 실제 투자 한도에 반영
+        max_exposure_pct = self.state_manager.state.get("max_exposure_pct", 100)
+        if max_exposure_pct < 100:
+            reduced_total = investable_total * (max_exposure_pct / 100)
+            logging.warning(f"⚠️ [가변 비중 적용] 외국인 수급 경계로 투자 가능 총액을 {max_exposure_pct}%로 제한합니다. ({investable_total:,.0f}원 → {reduced_total:,.0f}원)")
+            investable_total = reduced_total
+
         regular_orders = []
         skipped_dust_assets = []
         price_zero_assets = [] # [신규] 가격 조회 실패로 스킵된 종목 추적
+        unmapped_names = []    # [패치] 티커 미매칭 종목 추적 (미등록 자산 정리 오발동 방지용)
         is_capital_gain_expected = False
-        
+
         # 1. 일반 리밸런싱 주문 계산 및 수익 실현(매도) 여부 감지
         for asset_name, weight in target_weights.items():
             ticker = ASSET_TICKERS.get(asset_name)
             if not ticker:
                 logging.error(f"❌ [티커 미매칭] {asset_name} 종목에 해당하는 티커(종목코드)를 찾을 수 없습니다. config.py를 확인하세요.")
+                unmapped_names.append(asset_name)
                 continue
             
             target_value = investable_total * (weight / 100)
@@ -112,10 +125,13 @@ class Rebalancer:
                         is_capital_gain_expected = True
                     
                     # [모듈 9] 변동성 브레이크: 위기 종목은 매수(BUY) 원천 차단
-                    if side == "BUY" and self.state_manager.is_ticker_in_crisis(ticker):
+                    # [패치] 단, MarketSentinel이 기계적 투매(Bottom Fishing)로 판단해 재매수 모드를 켠 경우는 예외적으로 허용
+                    if side == "BUY" and self.state_manager.is_ticker_in_crisis(ticker) and not self.state_manager.is_bottom_fishing_active():
                         logging.warning(f"🚫 [브레이크 작동] {asset_name}({ticker}) 종목은 현재 위기 상태(CRISIS_MODE)이므로 추가 매수를 차단합니다.")
                         # 리스트에서 제거 (이번 리밸런싱에서 매수하지 않음)
                         continue
+                    elif side == "BUY" and self.state_manager.is_ticker_in_crisis(ticker):
+                        logging.info(f"🎣 [Bottom Fishing] {asset_name}({ticker})은 위기 상태이지만, 기계적 투매 재매수 모드가 활성화되어 매수를 허용합니다.")
                     
                     regular_orders.append({
                         "ticker": ticker,
@@ -137,17 +153,22 @@ class Rebalancer:
                     })
         
         # [신규] 1.1 미등록 자산(Config에 없는 종목) 자동 전량 매도 처리
-        config_tickers = [ASSET_TICKERS.get(name) for name in self.state_manager.portfolio_config.get("assets", {}).keys() if ASSET_TICKERS.get(name)]
-        for ticker, info in balance["assets"].items():
-            if ticker not in config_tickers and info.get("quantity", 0) > 0:
-                logging.warning(f"🧹 [기타 자산 정리] 포트폴리오 설정에 없는 종목 발견: {info['name']}({ticker}) {info['quantity']}주 전량 매도 결정.")
-                regular_orders.append({
-                    "ticker": ticker,
-                    "name": info["name"],
-                    "quantity": info["quantity"],
-                    "side": "SELL",
-                    "type": "REGULAR"
-                })
+        # [패치] 단, 티커 미매칭 종목이 하나라도 있으면 이 정리 로직을 통째로 스킵
+        # (config의 종목명이 단순히 ASSET_TICKERS와 표기가 달라 매칭 실패한 경우, 멀쩡히 보유 중인 그 종목을 '미등록'으로 오인해 전량 매도하는 사고 방지)
+        if unmapped_names:
+            logging.warning(f"⚠️ [기타 자산 정리 스킵] 티커 미매칭 종목({', '.join(unmapped_names)})이 존재하여, 오인 전량 매도 방지를 위해 이번 회차의 미등록 자산 정리를 건너뜁니다. config.py의 ASSET_TICKERS에 해당 종목명을 등록해주세요.")
+        else:
+            config_tickers = [ASSET_TICKERS.get(name) for name in self.state_manager.portfolio_config.get("assets", {}).keys() if ASSET_TICKERS.get(name)]
+            for ticker, info in balance["assets"].items():
+                if ticker not in config_tickers and info.get("quantity", 0) > 0:
+                    logging.warning(f"🧹 [기타 자산 정리] 포트폴리오 설정에 없는 종목 발견: {info['name']}({ticker}) {info['quantity']}주 전량 매도 결정.")
+                    regular_orders.append({
+                        "ticker": ticker,
+                        "name": info["name"],
+                        "quantity": info["quantity"],
+                        "side": "SELL",
+                        "type": "REGULAR"
+                    })
         
         sell_summary = [(o['name'], o['quantity']) for o in regular_orders if o['side'] == 'SELL']
         buy_summary = [(o['name'], o['quantity']) for o in regular_orders if o['side'] == 'BUY']

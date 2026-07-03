@@ -35,6 +35,7 @@ class StateManager:
                     if "permanent_instructions" not in data: data["permanent_instructions"] = []
                     # Market Sentinel 신규 필드
                     if "is_bottom_fishing_mode" not in data: data["is_bottom_fishing_mode"] = False
+                    if "bottom_fishing_until" not in data: data["bottom_fishing_until"] = ""
                     if "max_exposure_pct" not in data: data["max_exposure_pct"] = 100
                     if "foreign_futures_history" not in data: data["foreign_futures_history"] = []
                     # [패치] API 과금 방지용 쿨다운/할당량 필드
@@ -62,6 +63,7 @@ class StateManager:
             "profit_history": [0.0],
             "pending_retry_orders": [],
             "is_bottom_fishing_mode": False,
+            "bottom_fishing_until": "",
             "max_exposure_pct": 100,
             "foreign_futures_history": [],
             "gemini_cooldown_until": "",
@@ -179,19 +181,19 @@ class StateManager:
             except Exception as e:
                 pass
         
-        # 파일이 없을 시 기본 9개 종목 설정 생성
+        # 파일이 없을 시 기본 9개 종목 설정 생성 ({name: target_weight} 형식 - portfolio_config의 실제 런타임 포맷)
         default_config = {
-            "assets": [
-                {"name": "일본니케이225", "ticker": "1321", "target_weight": 8.5},
-                {"name": "차이나CSI300", "ticker": "159919", "target_weight": 8.5},
-                {"name": "200TR", "ticker": "278530", "target_weight": 8.5},
-                {"name": "미국나스닥100", "ticker": "133690", "target_weight": 8.5},
-                {"name": "인도Nifty", "ticker": "168490", "target_weight": 8.5},
-                {"name": "미국배당다우존스", "ticker": "452710", "target_weight": 8.5},
-                {"name": "ACE KRX금현물", "ticker": "411060", "target_weight": 19.0},
-                {"name": "국고채30년스트립", "ticker": "365780", "target_weight": 15.0},
-                {"name": "미국채30년액티브", "ticker": "452930", "target_weight": 15.0}
-            ]
+            "assets": {
+                "일본니케이225": 8.5,
+                "차이나CSI300": 8.5,
+                "200TR": 8.5,
+                "미국나스닥100": 8.5,
+                "인도Nifty": 8.5,
+                "미국배당다우존스": 8.5,
+                "ACE KRX금현물": 19.0,
+                "국고채30년스트립": 15.0,
+                "미국채30년액티브": 15.0
+            }
         }
         self.save_portfolio_config(default_config)
         return default_config
@@ -382,4 +384,37 @@ class StateManager:
         if self.state.get("kis_consecutive_failures", 0) > 0:
             self.state["kis_consecutive_failures"] = 0
             self.save_state()
+
+    # --- 5. MarketSentinel 연동: Bottom Fishing 모드 (자동 만료 포함) ---
+    def set_bottom_fishing_mode(self, active, duration_seconds=86400):
+        """프로그램 매도 폭탄 감지 시 활성화. 자동 만료 시각을 함께 기록하여 무한 지속을 방지."""
+        from datetime import timedelta
+        kst = pytz.timezone('Asia/Seoul')
+        self.state["is_bottom_fishing_mode"] = active
+        if active:
+            self.state["bottom_fishing_until"] = (datetime.now(kst) + timedelta(seconds=duration_seconds)).isoformat()
+        else:
+            self.state["bottom_fishing_until"] = ""
+        self.save_state()
+
+    def is_bottom_fishing_active(self):
+        """Bottom Fishing 모드가 켜져 있고 만료되지 않았는지 확인. 만료됐으면 자동으로 꺼줌."""
+        if not self.state.get("is_bottom_fishing_mode", False):
+            return False
+        until_str = self.state.get("bottom_fishing_until", "")
+        if not until_str:
+            return True
+        kst = pytz.timezone('Asia/Seoul')
+        try:
+            until = datetime.fromisoformat(until_str)
+            if until.tzinfo is None:
+                until = kst.localize(until)
+            if datetime.now(kst) >= until:
+                self.state["is_bottom_fishing_mode"] = False
+                self.state["bottom_fishing_until"] = ""
+                self.save_state()
+                return False
+            return True
+        except Exception:
+            return True
 

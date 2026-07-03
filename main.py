@@ -100,24 +100,24 @@ async def run_market_surveillance(state_manager, broker, data_provider, council,
             logging.info(f"💰 현금 급증 감지: +{cash_diff:,}원 (배당금 등)")
             # [패치] AI 호출 제거: 목표 비중 대비 가장 부족한 종목에 자동 투자 (하드코딩)
             from config import ASSET_TICKERS
-            config_assets = state_manager.portfolio_config.get("assets", [])
-            holdings = {item.get("pdno", ""): float(item.get("evlu_amt", 0)) for item in balance_data.get("stocks", [])}
+            config_assets = state_manager.portfolio_config.get("assets", {})  # {name: target_weight}
+            holdings = balance_data.get("assets", {})  # {ticker: {quantity, price, ...}}
             total_value = balance_data.get("total_value", 1)
-            
+
             # 각 종목의 목표 비중 vs 현재 비중 차이를 계산하여 가장 부족한 종목 선택
             best_target = None
             best_gap = -999
-            for asset in config_assets:
-                ticker = ASSET_TICKERS.get(asset["name"])
+            for asset_name, target_pct in config_assets.items():
+                ticker = ASSET_TICKERS.get(asset_name)
                 if not ticker:
                     continue
-                target_pct = asset.get("target_weight", 0)
-                current_val = holdings.get(ticker, 0)
+                current_info = holdings.get(ticker, {})
+                current_val = current_info.get("quantity", 0) * current_info.get("price", 0)
                 current_pct = (current_val / total_value * 100) if total_value > 0 else 0
                 gap = target_pct - current_pct  # 양수이면 부족
                 if gap > best_gap:
                     best_gap = gap
-                    best_target = {"name": asset["name"], "ticker": ticker}
+                    best_target = {"name": asset_name, "ticker": ticker}
             
             if best_target and best_gap > 0.5:  # 0.5% 이상 부족한 경우만 매수
                 ticker = best_target["ticker"]

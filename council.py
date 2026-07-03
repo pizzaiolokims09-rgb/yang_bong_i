@@ -142,10 +142,31 @@ class MultiAssetCouncil:
         config = state_manager.portfolio_config
         recent_memory = state_manager.get_recent_memory(limit=3)
         user_instructions = state_manager.get_instructions_context()
-        
+
         current_status = json.dumps(balance_data, indent=2, ensure_ascii=False)
         target_weights = json.dumps(config, indent=2, ensure_ascii=False)
-        
+
+        # [패치] 위기모드(CRISIS_MODE)로 매수가 차단된 종목을 AI에게 명시적으로 통지
+        crisis_tickers = state_manager.state.get("crisis_tickers", [])
+        if crisis_tickers:
+            from config import ASSET_TICKERS
+            config_names = set(config.get("assets", {}).keys())
+            # 역매핑: ASSET_TICKERS 전체 별칭에서 탐색하되, 현재 config에 있는 이름을 우선
+            ticker_to_name = {}
+            for name, t in ASSET_TICKERS.items():
+                if t not in ticker_to_name or name in config_names:
+                    ticker_to_name[t] = name
+            crisis_labels = []
+            for t in crisis_tickers:
+                name = ticker_to_name.get(t, "이름미상")
+                label = f"{name}({t})"
+                if name not in config_names:
+                    label += " [현재 포트폴리오 목록에 없음]"
+                crisis_labels.append(label)
+            crisis_info = ", ".join(crisis_labels)
+        else:
+            crisis_info = "없음 (모든 종목 매수 가능)"
+
         prompt = f"""[6인 에이전트 구성]
 1. {self.personas['macro']}
 2. {self.personas['geopolitics']}
@@ -162,6 +183,10 @@ class MultiAssetCouncil:
 
 [현재 목표 비중 설정 (동적 포트폴리오 설정)]
 {target_weights}
+
+[현재 매수 차단 종목 (변동성 브레이크 / CRISIS_MODE)]
+{crisis_info}
+* 주의: 위 종목은 시스템이 추가 매수(BUY)를 자동으로 차단하고 있습니다. target_weights에서 비중을 아무리 올려도 이 종목의 매수는 실제로 집행되지 않습니다. 해당 종목의 급락이 진정되어 매수를 재개하고 싶다면, 반드시 action을 "CRISIS_RESOLVED"로 설정하여 브레이크를 먼저 해제해야 합니다.
 
 [현재 계좌 잔고 및 수익률 현황]
 {current_status}
@@ -198,10 +223,32 @@ class MultiAssetCouncil:
                 }
                 
             result = self._parse_json_response(text)
-            
+
+            action = result.get("action", "HOLD")
+            weights = result.get("target_weights") or {}
+
+            # [패치] REBALANCE인데 비중이 비었거나 합계가 비정상이면 HOLD로 강등
+            # (빈 weights가 portfolio_config를 덮어쓰면 '미등록 자산 정리' 로직이 전 종목을 매도하는 사고 방지)
+            if action == "REBALANCE":
+                clean_weights = {}
+                for k, v in weights.items():
+                    try:
+                        clean_weights[str(k)] = float(v)
+                    except (TypeError, ValueError):
+                        logging.warning(f"[AI 응답 검증] 비중 값이 숫자가 아님: {k}={v} (무시)")
+                total_w = sum(clean_weights.values())
+                if not clean_weights or not (90.0 <= total_w <= 110.0):
+                    logging.error(f"[AI 응답 검증 실패] REBALANCE 비중이 비었거나 합계 이상({total_w:.1f}%). 안전을 위해 HOLD로 강등합니다.")
+                    return {
+                        "action": "HOLD",
+                        "weights": {},
+                        "minutes": f"AI가 REBALANCE를 제안했으나 비중 데이터가 불완전(합계 {total_w:.1f}%)하여 안전장치가 HOLD로 강등 처리했습니다."
+                    }
+                weights = clean_weights
+
             return {
-                "action": result.get("action", "HOLD"),
-                "weights": result.get("target_weights", {}),
+                "action": action,
+                "weights": weights,
                 "minutes": result.get("new_meeting_minutes", "AI 분석 결과 요약 없음")
             }
         except Exception as e:

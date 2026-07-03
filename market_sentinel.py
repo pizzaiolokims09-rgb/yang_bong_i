@@ -523,9 +523,8 @@ class MarketSentinel:
                     f"🛡️ 현재 HFT/기관의 기계적 투매로 판단하여, "
                     f"양봉이의 손절 로직을 일시 정지하고 **재매수(Bottom Fishing) 타점 탐색 모드**로 전환합니다."
                 )
-                # Bottom Fishing 모드 활성화 (state_manager를 통해)
-                state_manager.state["is_bottom_fishing_mode"] = True
-                state_manager.save_state()
+                # Bottom Fishing 모드 활성화 (24시간 후 자동 만료, state_manager를 통해)
+                state_manager.set_bottom_fishing_mode(True)
                 scan_result["alerts_sent"] += 1
 
             # (4) 가변 현금 비중
